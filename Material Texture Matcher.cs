@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEditor;
 using System.IO;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 
 public class MaterialTextureAssigner : EditorWindow
 {
@@ -108,14 +109,34 @@ public class MaterialTextureAssigner : EditorWindow
 
         // Create a dictionary of texture paths by name for faster lookup
         Dictionary<string, string> texturePathsByName = new Dictionary<string, string>();
+        Dictionary<string, List<string>> colorVariantTextures = new Dictionary<string, List<string>>();
+        
         foreach (string textureGUID in textureGUIDs)
         {
             string texturePath = AssetDatabase.GUIDToAssetPath(textureGUID);
             string textureName = Path.GetFileNameWithoutExtension(texturePath);
+            
+            // Store exact matches
             texturePathsByName[textureName] = texturePath;
+            
+            // Store color variant matches (materialName_color_XYZ)
+            Match match = Regex.Match(textureName, @"^(.+)_color_.*$");
+            if (match.Success)
+            {
+                string baseName = match.Groups[1].Value;
+                
+                if (!colorVariantTextures.ContainsKey(baseName))
+                {
+                    colorVariantTextures[baseName] = new List<string>();
+                }
+                
+                colorVariantTextures[baseName].Add(texturePath);
+            }
         }
 
         int matchCount = 0;
+        int exactMatchCount = 0;
+        int colorVariantMatchCount = 0;
         int totalCount = materialGUIDs.Length;
 
         // Process each material
@@ -128,8 +149,9 @@ public class MaterialTextureAssigner : EditorWindow
                 continue;
 
             string materialName = Path.GetFileNameWithoutExtension(materialPath);
+            bool matchFound = false;
             
-            // Try to find a matching texture
+            // Try to find an exact matching texture
             if (texturePathsByName.TryGetValue(materialName, out string texturePath))
             {
                 Texture2D texture = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
@@ -143,11 +165,40 @@ public class MaterialTextureAssigner : EditorWindow
                         EditorUtility.SetDirty(material);
                     }
                     
-                    LogMessage($"Matched material '{materialName}' with texture '{texturePath}'");
+                    LogMessage($"Exact match found: Material '{materialName}' with texture '{texturePath}'");
                     matchCount++;
+                    exactMatchCount++;
+                    matchFound = true;
                 }
             }
-            else
+            
+            // If no exact match was found, try finding a color variant
+            if (!matchFound && colorVariantTextures.TryGetValue(materialName, out List<string> variantPaths))
+            {
+                if (variantPaths.Count > 0)
+                {
+                    // Use the first color variant found
+                    string colorVariantPath = variantPaths[0];
+                    Texture2D texture = AssetDatabase.LoadAssetAtPath<Texture2D>(colorVariantPath);
+                    
+                    if (texture != null)
+                    {
+                        if (!dryRun)
+                        {
+                            // Assign the texture to the albedo slot
+                            material.SetTexture("_MainTex", texture);
+                            EditorUtility.SetDirty(material);
+                        }
+                        
+                        LogMessage($"Color variant match found: Material '{materialName}' with texture '{colorVariantPath}'");
+                        matchCount++;
+                        colorVariantMatchCount++;
+                        matchFound = true;
+                    }
+                }
+            }
+            
+            if (!matchFound)
             {
                 LogMessage($"No matching texture found for material '{materialName}'");
             }
@@ -160,6 +211,7 @@ public class MaterialTextureAssigner : EditorWindow
 
         string modeText = dryRun ? "Preview" : "Assigned";
         LogMessage($"Completed! {modeText} {matchCount} of {totalCount} materials with albedo textures.");
+        LogMessage($"Breakdown: {exactMatchCount} exact matches, {colorVariantMatchCount} color variant matches.");
     }
 
     private string GetRelativePath(string absolutePath)

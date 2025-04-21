@@ -21,9 +21,9 @@ public class MaterialTextureAssigner : EditorWindow
 
     private void OnGUI()
     {
-        GUILayout.Label("Assign Albedo Textures to Materials", EditorStyles.boldLabel);
+        GUILayout.Label("Assign Textures to Materials", EditorStyles.boldLabel);
 
-        EditorGUILayout.HelpBox("This tool will match material names with texture file names and assign the textures to the albedo slot.", MessageType.Info);
+        EditorGUILayout.HelpBox("This tool will match material names with texture file names and assign the textures to the appropriate slots (albedo and normal).", MessageType.Info);
 
         EditorGUILayout.Space();
         
@@ -107,9 +107,10 @@ public class MaterialTextureAssigner : EditorWindow
             return;
         }
 
-        // Create a dictionary of texture paths by name for faster lookup
-        Dictionary<string, string> texturePathsByName = new Dictionary<string, string>();
+        // Create dictionaries for different texture types
+        Dictionary<string, string> exactMatches = new Dictionary<string, string>();
         Dictionary<string, List<string>> colorVariantTextures = new Dictionary<string, List<string>>();
+        Dictionary<string, List<string>> normalMapTextures = new Dictionary<string, List<string>>();
         
         foreach (string textureGUID in textureGUIDs)
         {
@@ -117,7 +118,22 @@ public class MaterialTextureAssigner : EditorWindow
             string textureName = Path.GetFileNameWithoutExtension(texturePath);
             
             // Store exact matches
-            texturePathsByName[textureName] = texturePath;
+            exactMatches[textureName] = texturePath;
+            
+            // Check if this is a normal map texture
+            if (textureName.Contains("_normal"))
+            {
+                // Extract the base name (everything before "_normal")
+                string baseName = Regex.Replace(textureName, "_normal.*$", "");
+                
+                if (!normalMapTextures.ContainsKey(baseName))
+                {
+                    normalMapTextures[baseName] = new List<string>();
+                }
+                
+                normalMapTextures[baseName].Add(texturePath);
+                continue;  // Skip further processing for normal maps
+            }
             
             // Store color variant matches (materialName_color_XYZ)
             Match match = Regex.Match(textureName, @"^(.+)_color_.*$");
@@ -134,9 +150,10 @@ public class MaterialTextureAssigner : EditorWindow
             }
         }
 
-        int matchCount = 0;
-        int exactMatchCount = 0;
+        int albedoMatchCount = 0;
+        int exactAlbedoMatchCount = 0;
         int colorVariantMatchCount = 0;
+        int normalMapMatchCount = 0;
         int totalCount = materialGUIDs.Length;
 
         // Process each material
@@ -149,12 +166,13 @@ public class MaterialTextureAssigner : EditorWindow
                 continue;
 
             string materialName = Path.GetFileNameWithoutExtension(materialPath);
-            bool matchFound = false;
+            bool albedoMatchFound = false;
+            bool normalMapMatchFound = false;
             
-            // Try to find an exact matching texture
-            if (texturePathsByName.TryGetValue(materialName, out string texturePath))
+            // Try to find an exact matching albedo texture
+            if (exactMatches.TryGetValue(materialName, out string albedoTexturePath))
             {
-                Texture2D texture = AssetDatabase.LoadAssetAtPath<Texture2D>(texturePath);
+                Texture2D texture = AssetDatabase.LoadAssetAtPath<Texture2D>(albedoTexturePath);
                 
                 if (texture != null)
                 {
@@ -165,20 +183,20 @@ public class MaterialTextureAssigner : EditorWindow
                         EditorUtility.SetDirty(material);
                     }
                     
-                    LogMessage($"Exact match found: Material '{materialName}' with texture '{texturePath}'");
-                    matchCount++;
-                    exactMatchCount++;
-                    matchFound = true;
+                    LogMessage($"Exact albedo match found: Material '{materialName}' with texture '{albedoTexturePath}'");
+                    albedoMatchCount++;
+                    exactAlbedoMatchCount++;
+                    albedoMatchFound = true;
                 }
             }
             
-            // If no exact match was found, try finding a color variant
-            if (!matchFound && colorVariantTextures.TryGetValue(materialName, out List<string> variantPaths))
+            // If no exact albedo match was found, try finding a color variant
+            if (!albedoMatchFound && colorVariantTextures.TryGetValue(materialName, out List<string> colorVariantPaths))
             {
-                if (variantPaths.Count > 0)
+                if (colorVariantPaths.Count > 0)
                 {
                     // Use the first color variant found
-                    string colorVariantPath = variantPaths[0];
+                    string colorVariantPath = colorVariantPaths[0];
                     Texture2D texture = AssetDatabase.LoadAssetAtPath<Texture2D>(colorVariantPath);
                     
                     if (texture != null)
@@ -191,16 +209,74 @@ public class MaterialTextureAssigner : EditorWindow
                         }
                         
                         LogMessage($"Color variant match found: Material '{materialName}' with texture '{colorVariantPath}'");
-                        matchCount++;
+                        albedoMatchCount++;
                         colorVariantMatchCount++;
-                        matchFound = true;
+                        albedoMatchFound = true;
                     }
                 }
             }
             
-            if (!matchFound)
+            // Try to find a normal map texture
+            if (normalMapTextures.TryGetValue(materialName, out List<string> normalMapPaths))
             {
-                LogMessage($"No matching texture found for material '{materialName}'");
+                if (normalMapPaths.Count > 0)
+                {
+                    // Use the first normal map found
+                    string normalMapPath = normalMapPaths[0];
+                    Texture2D normalMap = AssetDatabase.LoadAssetAtPath<Texture2D>(normalMapPath);
+                    
+                    if (normalMap != null)
+                    {
+                        if (!dryRun)
+                        {
+                            // Set texture to be a normal map if it's not already
+                            TextureImporter importer = AssetImporter.GetAtPath(normalMapPath) as TextureImporter;
+                            if (importer != null && !importer.isReadable)
+                            {
+                                // Only modify import settings if necessary
+                                if (importer.textureType != TextureImporterType.NormalMap)
+                                {
+                                    importer.textureType = TextureImporterType.NormalMap;
+                                    importer.SaveAndReimport();
+                                    // Reload the normal map after reimporting
+                                    normalMap = AssetDatabase.LoadAssetAtPath<Texture2D>(normalMapPath);
+                                }
+                            }
+
+                            // Assign the texture to the normal map slot
+                            material.SetTexture("_BumpMap", normalMap);
+                            
+                            // Enable normal map if the shader supports it
+                            if (material.HasProperty("_NormalMap"))
+                            {
+                                material.SetFloat("_NormalMap", 1.0f);
+                            }
+                            else if (material.HasProperty("_BumpScale"))
+                            {
+                                material.SetFloat("_BumpScale", 1.0f);
+                            }
+
+                            EditorUtility.SetDirty(material);
+                        }
+                        
+                        LogMessage($"Normal map found: Material '{materialName}' with normal map '{normalMapPath}'");
+                        normalMapMatchCount++;
+                        normalMapMatchFound = true;
+                    }
+                }
+            }
+            
+            if (!albedoMatchFound && !normalMapMatchFound)
+            {
+                LogMessage($"No matching textures found for material '{materialName}'");
+            }
+            else if (!albedoMatchFound)
+            {
+                LogMessage($"No albedo texture found for material '{materialName}'");
+            }
+            else if (!normalMapMatchFound)
+            {
+                LogMessage($"No normal map found for material '{materialName}'");
             }
         }
 
@@ -210,8 +286,8 @@ public class MaterialTextureAssigner : EditorWindow
         }
 
         string modeText = dryRun ? "Preview" : "Assigned";
-        LogMessage($"Completed! {modeText} {matchCount} of {totalCount} materials with albedo textures.");
-        LogMessage($"Breakdown: {exactMatchCount} exact matches, {colorVariantMatchCount} color variant matches.");
+        LogMessage($"Completed! {modeText} {albedoMatchCount + normalMapMatchCount} textures for {totalCount} materials.");
+        LogMessage($"Breakdown: {exactAlbedoMatchCount} exact albedo matches, {colorVariantMatchCount} color variant matches, {normalMapMatchCount} normal map matches.");
     }
 
     private string GetRelativePath(string absolutePath)
